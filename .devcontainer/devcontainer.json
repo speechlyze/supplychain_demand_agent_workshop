@@ -11,7 +11,13 @@
       "version": "20"
     }
   },
-  "forwardPorts": [1521, 8000, 3000],
+  // Port 3000 is intentionally NOT in forwardPorts. When a port is pre-declared
+  // there, Codespaces sets up the tunnel at container start (before vite is
+  // listening) and fires onAutoForward once at that moment — openPreview then
+  // races vite's bootup, shows "can't connect", and never re-fires when vite
+  // actually binds. Leaving 3000 out lets Codespaces auto-detect it the
+  // instant vite starts listening, which is when we actually want the preview.
+  "forwardPorts": [1521, 8000],
   "portsAttributes": {
     "1521": {
       "label": "Oracle AI Database",
