@@ -1,6 +1,6 @@
 {
   "name": "Supply-chain demand-planning agent workshop",
-  "image": "mcr.microsoft.com/devcontainers/python:3.11",
+  "image": "mcr.microsoft.com/devcontainers/python:3.11-bookworm",
   "hostRequirements": {
     "cpus": 4,
     "memory": "8gb"
