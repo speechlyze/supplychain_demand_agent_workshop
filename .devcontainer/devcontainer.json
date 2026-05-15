@@ -48,14 +48,24 @@
       }
     }
   },
-  "remoteEnv": {
-    "OPENAI_API_KEY": "${localEnv:OPENAI_API_KEY}",
-    "OCI_GENAI_API_KEY": "${localEnv:OCI_GENAI_API_KEY}",
-    "OCI_GENAI_ENDPOINT": "${localEnv:OCI_GENAI_ENDPOINT}",
-    "LLM_PROVIDER": "${localEnv:LLM_PROVIDER}",
-    "LLM_MODEL": "${localEnv:LLM_MODEL}",
+  // ── Static defaults that every process in the container needs to see ─────
+  // containerEnv is visible to lifecycle scripts (postStartCommand → start_app.sh)
+  // AND to the VS Code terminal. remoteEnv is editor-only — it would NOT reach
+  // start_app.sh, so uvicorn would launch blind to ORACLE_* and LLM_PROVIDER.
+  "containerEnv": {
+    "LLM_PROVIDER": "oci",
+    "LLM_MODEL": "xai.grok-4-1-fast-reasoning",
+    "OCI_GENAI_ENDPOINT": "https://inference.generativeai.us-phoenix-1.oci.oraclecloud.com",
     "ORACLE_USER": "AGENT",
     "ORACLE_PASSWORD": "AgentPwd_2025",
     "ORACLE_DSN": "localhost:1521/FREEPDB1"
+  },
+  // ── Secrets only ─────────────────────────────────────────────────────────
+  // These pull from the user's local env (or Codespace user secrets configured
+  // in the GitHub UI: Settings → Codespaces → Secrets). Empty values are fine
+  // — the active provider's key is the one that needs to be set.
+  "remoteEnv": {
+    "OPENAI_API_KEY": "${localEnv:OPENAI_API_KEY}",
+    "OCI_GENAI_API_KEY": "${localEnv:OCI_GENAI_API_KEY}"
   }
 }
