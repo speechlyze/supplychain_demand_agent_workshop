@@ -2,7 +2,7 @@
 
 **Build a multi-agent demand-planning assistant on Oracle AI Database — every memory layer, every retrieval primitive, every LLM call traced back to one database. Then see it running in a real chat UI.**
 
-[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/your-org/supplychain-demand-agent-workshop)
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/speechlyze/supplychain_demand_agent_workshop)
 
 ![Demand planning with a human in the loop](images/oracle_multi_agent_demand.png)
 
