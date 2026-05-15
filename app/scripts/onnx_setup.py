@@ -3,6 +3,15 @@
 
 Runs once during Codespace post-create after `bootstrap.py`. Idempotent.
 
+The Oracle database runs inside a separate Docker container (`oracle-free`)
+that does NOT share the Codespace VM's filesystem. So the steps are:
+
+  1. Download + unzip the .onnx file on the Codespace VM (under /tmp).
+  2. `docker cp` it INTO the oracle-free container at /opt/oracle/onnx_models/.
+  3. Create an Oracle DIRECTORY pointing at that in-container path.
+  4. Call DBMS_VECTOR.LOAD_ONNX_MODEL (via langchain_oracledb's helper) to
+     register it as ALL_MINILM_L12_V2.
+
 After this step the AGENT schema has a mining model named ALL_MINILM_L12_V2
 that the workshop's notebook uses through `OracleEmbeddings`:
 
@@ -17,31 +26,49 @@ The model produces 384-dim float vectors.
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
+import urllib.error
 import urllib.request
+import zipfile
 from pathlib import Path
 
 import oracledb
 from langchain_oracledb import OracleEmbeddings
 
 
-# Public, pre-converted ONNX model from OCI's GenAI samples (same one
-# the reference enterprise_data_agent_harness_workshop uses).
+# Public, pre-converted ONNX model from Oracle's OML samples bucket.
+# Same URL used by enterprise_data_agent_harness_workshop_lightweight.
 ONNX_URL = os.environ.get(
     "ONNX_URL",
-    "https://objectstorage.us-ashburn-1.oraclecloud.com/p/"
-    "fsSt0g4PNHevuJxd6t2qBNcyAfbF0Pf6cAKi6pSjUUjpvWQVdsiDjGdjFXFnstxC/n/"
-    "adwc4pm/b/OML-Resources/o/all_MiniLM_L12_v2_augmented.zip",
+    "https://adwc4pm.objectstorage.us-ashburn-1.oci.customer-oci.com"
+    "/p/TtH6hL2y25EypZ0-rrczRZ1aXp7v1ONbRBfCiT-BDBN8WLKQ3lgyW6RxCfIFLdA6"
+    "/n/adwc4pm/b/OML-ai-models/o/all_MiniLM_L12_v2_augmented.zip",
 )
 MODEL_NAME = os.environ.get("ONNX_EMBED_MODEL", "ALL_MINILM_L12_V2")
 ONNX_FILENAME = os.environ.get("ONNX_FILENAME", "all_MiniLM_L12_v2.onnx")
 
-CACHE_DIR = Path(os.environ.get("ONNX_CACHE_DIR", "/tmp/onnx_models"))
+ORACLE_CONTAINER = os.environ.get("ORACLE_CONTAINER", "oracle-free")
+CONTAINER_MODEL_DIR = os.environ.get("ONNX_CONTAINER_DIR", "/opt/oracle/onnx_models")
 ORACLE_DIR_NAME = os.environ.get("ONNX_ORACLE_DIRECTORY", "ONNX_DUMP")
 
 AGENT_USER = os.environ.get("AGENT_USER", "AGENT")
 AGENT_PASSWORD = os.environ.get("AGENT_PASSWORD", "AgentPwd_2025")
 DSN = os.environ.get("ORACLE_DSN", "localhost:1521/FREEPDB1")
+
+
+def _container_cli() -> str:
+    """Return 'docker' if available, else 'podman'. Codespaces always has docker."""
+    return "docker" if shutil.which("docker") else "podman"
+
+
+def _exists_in_container(cli: str, path: str) -> bool:
+    return subprocess.run(
+        [cli, "exec", ORACLE_CONTAINER, "test", "-f", path],
+        capture_output=True,
+    ).returncode == 0
 
 
 def _model_already_loaded(conn) -> bool:
@@ -54,29 +81,63 @@ def _model_already_loaded(conn) -> bool:
     return n > 0
 
 
-def _download_and_extract() -> Path:
-    """Download the model zip and return the path to the .onnx file."""
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    onnx_path = CACHE_DIR / ONNX_FILENAME
-    if onnx_path.exists() and onnx_path.stat().st_size > 0:
-        print(f"[onnx_setup] reusing cached {onnx_path} ({onnx_path.stat().st_size:,} bytes).")
-        return onnx_path
+def _stage_in_container() -> str:
+    """Download, unzip on the host, copy into the Oracle container.
 
-    zip_path = CACHE_DIR / "model.zip"
-    print(f"[onnx_setup] downloading {ONNX_URL} → {zip_path} …")
-    urllib.request.urlretrieve(ONNX_URL, zip_path)
+    Returns the in-container path of the .onnx file.
+    """
+    cli = _container_cli()
+    if not shutil.which(cli):
+        raise SystemExit(
+            f"Cannot find {cli!r} on PATH. The Oracle DB runs in a separate\n"
+            f"container; we need '{cli}' to stage the ONNX file into it."
+        )
 
-    print(f"[onnx_setup] extracting {ONNX_FILENAME} from {zip_path} …")
-    import zipfile
-    with zipfile.ZipFile(zip_path) as zf:
-        candidates = [n for n in zf.namelist() if n.endswith(".onnx")]
-        if not candidates:
-            raise RuntimeError(f"no .onnx file in archive {zip_path}")
-        chosen = candidates[0]
-        with zf.open(chosen) as src, open(onnx_path, "wb") as dst:
-            dst.write(src.read())
-    print(f"[onnx_setup] extracted to {onnx_path} ({onnx_path.stat().st_size:,} bytes).")
-    return onnx_path
+    target = f"{CONTAINER_MODEL_DIR}/{ONNX_FILENAME}"
+
+    # If the container already has the file, skip the whole pipeline.
+    subprocess.run(
+        [cli, "exec", ORACLE_CONTAINER, "mkdir", "-p", CONTAINER_MODEL_DIR],
+        check=True,
+    )
+    if _exists_in_container(cli, target):
+        print(f"[onnx_setup] {target} already present in {ORACLE_CONTAINER} — reusing.")
+        return target
+
+    print(f"[onnx_setup] downloading {ONNX_URL} (~117 MB) …")
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        zip_path = tmp / "model.zip"
+        try:
+            urllib.request.urlretrieve(ONNX_URL, zip_path)
+        except urllib.error.URLError as e:
+            raise SystemExit(
+                f"[onnx_setup] download failed: {e}. The pre-signed URL may have "
+                "rotated. See: https://docs.oracle.com/en/database/oracle/oracle-database/26/"
+                "vecse/import-onnx-models-oracle-database-end-end-example.html"
+            )
+
+        print(f"[onnx_setup] extracting {ONNX_FILENAME} from archive …")
+        with zipfile.ZipFile(zip_path) as zf:
+            candidates = [n for n in zf.namelist() if n.endswith(".onnx")]
+            if not candidates:
+                raise RuntimeError(f"no .onnx file in archive {zip_path}")
+            zf.extract(candidates[0], tmp)
+            onnx_host_path = tmp / candidates[0]
+
+        print(f"[onnx_setup] copying {onnx_host_path.name} → {ORACLE_CONTAINER}:{target}")
+        subprocess.run(
+            [cli, "cp", str(onnx_host_path), f"{ORACLE_CONTAINER}:{target}"],
+            check=True,
+        )
+        # Ensure the oracle user inside the container can read it.
+        subprocess.run(
+            [cli, "exec", "--user", "0", ORACLE_CONTAINER, "chmod", "644", target],
+            check=False, capture_output=True,
+        )
+
+    print(f"[onnx_setup] staged at {ORACLE_CONTAINER}:{target}")
+    return target
 
 
 def main() -> int:
@@ -90,15 +151,15 @@ def main() -> int:
         print(f"[onnx_setup] model {MODEL_NAME!r} already loaded — skipping.")
         return 0
 
-    onnx_path = _download_and_extract()
+    _stage_in_container()
 
-    # Ensure an Oracle DIRECTORY object points at the model's parent directory
-    # so DBMS_VECTOR.LOAD_ONNX_MODEL can read it. CREATE OR REPLACE is fine.
+    # Point Oracle at the in-container directory. AGENT has CREATE ANY DIRECTORY
+    # from bootstrap.py so this works without SYSDBA.
     cur = conn.cursor()
-    print(f"[onnx_setup] CREATE OR REPLACE DIRECTORY {ORACLE_DIR_NAME} AS '{onnx_path.parent}'")
+    print(f"[onnx_setup] CREATE OR REPLACE DIRECTORY {ORACLE_DIR_NAME} AS '{CONTAINER_MODEL_DIR}'")
     try:
         cur.execute(
-            f"CREATE OR REPLACE DIRECTORY {ORACLE_DIR_NAME} AS '{onnx_path.parent}'"
+            f"CREATE OR REPLACE DIRECTORY {ORACLE_DIR_NAME} AS '{CONTAINER_MODEL_DIR}'"
         )
     except oracledb.DatabaseError as e:
         print(f"[onnx_setup] FATAL: cannot create directory ({e}). "
@@ -110,10 +171,17 @@ def main() -> int:
     OracleEmbeddings.load_onnx_model(
         conn=conn,
         dir=ORACLE_DIR_NAME,
-        onnx_file=onnx_path.name,
+        onnx_file=ONNX_FILENAME,
         model_name=MODEL_NAME,
     )
-    print(f"✅ ONNX model {MODEL_NAME} loaded ({onnx_path.stat().st_size:,} bytes).")
+
+    # Smoke test: make sure the model produces a vector.
+    cur.execute(
+        f"SELECT VECTOR_EMBEDDING({MODEL_NAME} USING :t AS DATA) FROM dual",
+        t="bootstrap embedding round-trip.",
+    )
+    vec = cur.fetchone()[0]
+    print(f"✅ ONNX model {MODEL_NAME} loaded; smoke test produced {len(vec)}-dim vector.")
     return 0
 
 
