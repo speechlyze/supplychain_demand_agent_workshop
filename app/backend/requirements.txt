@@ -4,6 +4,7 @@ oracledb>=4.0.0
 langgraph>=1.0.0
 langgraph-supervisor>=0.0.27
 langgraph-oracledb>=1.0.1
+langchain>=1.0.0
 langchain-oracledb>=1.4.0
 langchain-openai>=0.3.0
 langchain-community>=0.3.0

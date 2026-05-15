@@ -9,6 +9,7 @@ cd "$WORKSHOP_ROOT"
 echo "▶ Installing workshop Python dependencies …"
 pip install --quiet --upgrade pip
 pip install --quiet \
+    langchain \
     langgraph \
     langgraph-supervisor \
     langgraph-oracledb \
